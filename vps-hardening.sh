@@ -76,6 +76,15 @@ echo ""
 prompt_str  DEPLOY_USER        "Deploy username"
 prompt_int  SSH_PORT           "SSH port" 22
 prompt_str  SSH_PUBLIC_KEY     "SSH public key (ssh-ed25519/ssh-rsa ...)"
+
+if [ "$SSH_PORT" -lt 1 ] || [ "$SSH_PORT" -gt 65535 ]; then
+    echo "Invalid SSH port: ${SSH_PORT}"
+    exit 1
+fi
+case "$SSH_PUBLIC_KEY" in
+    ssh-ed25519\ *|ssh-rsa\ *|ecdsa-sha2-nistp256\ *|ecdsa-sha2-nistp384\ *|ecdsa-sha2-nistp521\ *|sk-ssh-ed25519@openssh.com\ *|sk-ecdsa-sha2-nistp256@openssh.com\ *) ;;
+    *) echo "Invalid SSH public key format."; exit 1 ;;
+esac
 prompt_int  SWAP_MB            "Swap size in MB (0 to skip)" 2048
 prompt_yn   SSH_TAILSCALE_ONLY "Bind SSH to Tailscale interface only (strongly recommended)?" y
 prompt_yn   SUDO_NOPASSWD      "Grant deploy user passwordless sudo (no password is set otherwise)?" y
@@ -178,7 +187,7 @@ write_file() {
 echo "[1/N] Updating system packages..."
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -y
-apt-get upgrade -y
+apt-get upgrade -y -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold
 apt-get install -y \
     ufw fail2ban unattended-upgrades apt-listchanges \
     ca-certificates curl wget gnupg lsb-release \
@@ -214,6 +223,11 @@ fi
 write_file "/etc/sudoers.d/${DEPLOY_USER}" "${SUDOERS_LINE}
 Defaults:${DEPLOY_USER} logfile=\"/var/log/sudo.log\"
 " 0440
+if ! visudo -cf "/etc/sudoers.d/${DEPLOY_USER}" >/dev/null; then
+    echo "Sudoers file failed validation; removing to keep sudo usable."
+    rm -f "/etc/sudoers.d/${DEPLOY_USER}"
+    exit 1
+fi
 touch /var/log/sudo.log
 chmod 600 /var/log/sudo.log
 
@@ -264,7 +278,9 @@ vm.swappiness = 10
 fs.file-max = 1048576
 net.core.somaxconn = 4096
 "
-sysctl --system
+# nf_conntrack module must be loaded before setting nf_conntrack_max
+modprobe nf_conntrack 2>/dev/null || true
+sysctl --system || echo "  Warning: some sysctl keys failed to apply."
 
 # ---------------------------------------------------------------------------
 # 6. SSH hardening
@@ -328,6 +344,7 @@ ufw allow out 123/udp  comment 'NTP'         >/dev/null
 ufw allow out 80/tcp   comment 'HTTP egress'  >/dev/null
 ufw allow out 443/tcp  comment 'HTTPS egress' >/dev/null
 ufw allow out 41641/udp comment 'Tailscale'  >/dev/null
+ufw allow out 3478/udp  comment 'Tailscale STUN' >/dev/null
 
 # Inbound: SSH rate-limited; 80/443 only if Caddy installed
 if [ "$SSH_TAILSCALE_ONLY" = "n" ]; then
@@ -372,7 +389,7 @@ findtime = 600
 maxretry = 5
 destemail = root@localhost
 sendername = Fail2Ban
-action = %(action_mwl)s
+action = %(action_)s
 
 [sshd]
 enabled  = true
@@ -393,7 +410,7 @@ if [ "$INSTALL_TAILSCALE" = "y" ]; then
     echo "[9/N] Installing Tailscale..."
     CODENAME="$(lsb_release -cs)"
     curl -fsSL "https://pkgs.tailscale.com/stable/ubuntu/${CODENAME}.noarmor.gpg" \
-        | gpg --dearmor -o /usr/share/keyrings/tailscale-archive-keyring.gpg
+        | gpg --dearmor --yes -o /usr/share/keyrings/tailscale-archive-keyring.gpg
     curl -fsSL "https://pkgs.tailscale.com/stable/ubuntu/${CODENAME}.tailscale-keyring.list" \
         | tee /etc/apt/sources.list.d/tailscale.list >/dev/null
     apt-get update -y
@@ -429,7 +446,7 @@ fi
 echo "[10/N] Installing Docker + compose plugin..."
 install -m 0755 -d /etc/apt/keyrings
 curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
-    | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+    | gpg --dearmor --yes -o /etc/apt/keyrings/docker.gpg
 chmod a+r /etc/apt/keyrings/docker.gpg
 write_file /etc/apt/sources.list.d/docker.list "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable"
 apt-get update -y
@@ -466,8 +483,8 @@ if [ "$INSTALL_GVISOR" = "y" ]; then
     echo "[11/N] Installing gVisor (runsc)..."
     # Use the official gVisor apt repo for Ubuntu.
     curl -fsSL https://gvisor.dev/archive.key \
-        | gpg --dearmor -o /usr/share/keyrings/gvisor-archive-keyring.gpg
-    write_file /etc/apt/sources.list.d/gvisor.list "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/gvisor-archive-keyring.gpg] https://storage.googleapis.com/gvisor/releases/released/apt $(dpkg --print-architecture) main"
+        | gpg --dearmor --yes -o /usr/share/keyrings/gvisor-archive-keyring.gpg
+    write_file /etc/apt/sources.list.d/gvisor.list "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/gvisor-archive-keyring.gpg] https://storage.googleapis.com/gvisor/releases release main"
     apt-get update -y
     apt-get install -y runsc
     # daemon.json already registers the runtime; no restart needed again.
@@ -483,7 +500,7 @@ if [ "$INSTALL_CADDY" = "y" ]; then
     echo "[12/N] Installing Caddy..."
     apt-get install -y debian-keyring debian-archive-keyring apt-transport-https
     curl -fsSL https://dl.cloudsmith.io/public/caddy/stable/gpg.key \
-        | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+        | gpg --dearmor --yes -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
     curl -fsSL https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt \
         | tee /etc/apt/sources.list.d/caddy-stable.list >/dev/null
     apt-get update -y
@@ -503,7 +520,9 @@ if [ "$INSTALL_CADDY" = "y" ]; then
     CADDYFILE=""
     IFS=',' read -ra DOMAIN_ARRAY <<< "$CADDY_DOMAINS"
     for domain in "${DOMAIN_ARRAY[@]}"; do
-        domain=$(echo "$domain" | xargs)
+        domain="${domain#"${domain%%[![:space:]]*}"}"
+        domain="${domain%"${domain##*[![:space:]]}"}"
+        [ -z "$domain" ] && continue
         CADDYFILE="${CADDYFILE}${domain} {
     reverse_proxy 127.0.0.1:8080
     tls {
@@ -592,17 +611,11 @@ fi
 if [ "$INSTALL_AIDE" = "y" ]; then
     echo "[16/N] Installing AIDE..."
     apt-get install -y aide
-    # Minimal config: watch key paths
-    write_file /etc/aide/aide.conf.orig-gen "# Generated by vps-hardening.sh
-database_in=file:/var/lib/aide/aide.db
-database_out=file:/var/lib/aide/aide.db.new
-database_new=file:/var/lib/aide/aide.db.new
+    # Drop-in loaded by the distro /etc/aide/aide.conf (includes aide.conf.d)
+    mkdir -p /etc/aide/aide.conf.d
+    write_file /etc/aide/aide.conf.d/99-vps-hardening "# Generated by vps-hardening.sh
 
-# Rules
-p = p+u+g+i+n+m+acl+xattrs
-d = d+u+g+i+n+m+acl+xattrs
-
-# Watch critical paths
+# Watch critical paths (p = permissions+user+group+inode+links+mtime+acl+xattrs)
 /etc p
 /opt p
 /root p
@@ -612,9 +625,6 @@ d = d+u+g+i+n+m+acl+xattrs
 !/var/log
 !/var/lib/aide
 !/var/spool
-!/proc
-!/sys
-!/dev
 " 0640
     # Use distro config but add our paths to the database initialization.
     aideinit
@@ -635,7 +645,7 @@ fi
 if [ "$INSTALL_FALCO" = "y" ]; then
     echo "[17/N] Installing Falco..."
     curl -fsSL https://falco.org/repo/falcosecurity-packages.asc \
-        | gpg --dearmor -o /usr/share/keyrings/falco-archive-keyring.gpg
+        | gpg --dearmor --yes -o /usr/share/keyrings/falco-archive-keyring.gpg
     write_file /etc/apt/sources.list.d/falco.list "deb [signed-by=/usr/share/keyrings/falco-archive-keyring.gpg] https://download.falco.org/packages/deb stable main"
     apt-get update -y
     apt-get install -y falco
@@ -686,13 +696,17 @@ YAML
   memory:
     image: alpine:latest
     container_name: memory-store
-    restart: unless-stopped
+    restart: "no"
     volumes:
       - ./data/memory:/data
     command: >
-      sh -c "apk add --no-cache sqlite && wget -qO /data/sqlite-vec.tar.gz
-        https://github.com/asg017/sqlite-vec/releases/latest/download/sqlite-vec-static.tar.gz
-        && tar -xzf /data/sqlite-vec.tar.gz -C /data
+      sh -c "apk add --no-cache sqlite
+        && if [ ! -f /data/.vec-installed ]; then
+             wget -qO /data/sqlite-vec.tar.gz
+             https://github.com/asg017/sqlite-vec/releases/latest/download/sqlite-vec-static.tar.gz
+             && tar -xzf /data/sqlite-vec.tar.gz -C /data
+             && touch /data/.vec-installed;
+           fi
         && sqlite3 /data/memory.db '.databases'"
 YAML
 
@@ -913,7 +927,7 @@ if [ "$INSTALL_DOPPLER" = "y" ]; then
 
 ## Doppler
 
-Service token stored at /etc/doppler/token (mode 0640, root:\$(id -gn ${DEPLOY_USER})).
+Service token stored at /etc/doppler/token (mode 0640, root:${DEPLOY_USER}).
 
 Invoke with secrets injected:
 
@@ -978,6 +992,11 @@ MD"
 # ---------------------------------------------------------------------------
 
 echo "[24/N] Restarting services with new config..."
+if ! sshd -t; then
+    echo "ERROR: sshd config validation failed (sshd -t). NOT restarting sshd."
+    echo "Check /etc/ssh/sshd_config.d/*.conf and fix before restarting manually."
+    exit 1
+fi
 if systemctl status ssh.service >/dev/null 2>&1; then
     systemctl restart ssh.service
 elif systemctl status sshd.service >/dev/null 2>&1; then
