@@ -78,6 +78,7 @@ prompt_int  SSH_PORT           "SSH port" 22
 prompt_str  SSH_PUBLIC_KEY     "SSH public key (ssh-ed25519/ssh-rsa ...)"
 prompt_int  SWAP_MB            "Swap size in MB (0 to skip)" 2048
 prompt_yn   SSH_TAILSCALE_ONLY "Bind SSH to Tailscale interface only (strongly recommended)?" y
+prompt_yn   SUDO_NOPASSWD      "Grant deploy user passwordless sudo (no password is set otherwise)?" y
 prompt_yn   INSTALL_GVISOR     "Install gVisor (runsc) for sandboxing user-supplied code?" n
 prompt_yn   INSTALL_DOPPLER    "Install Doppler CLI?" y
 if [ "$INSTALL_DOPPLER" = "y" ]; then
@@ -91,6 +92,10 @@ fi
 prompt_yn   INSTALL_TAILSCALE  "Install Tailscale?" y
 if [ "$INSTALL_TAILSCALE" = "y" ]; then
     prompt_str TS_AUTH_KEY     "Tailscale auth key (tskey-...) (leave blank to auth later)"
+fi
+if [ "$SSH_TAILSCALE_ONLY" = "y" ] && [ "$INSTALL_TAILSCALE" != "y" ]; then
+    echo "Warning: Tailscale-only SSH requires Tailscale. Disabling tailscale-only binding."
+    SSH_TAILSCALE_ONLY="n"
 fi
 prompt_yn   INSTALL_PI         "Install Pi coding agent (pi.dev)?" y
 
@@ -129,6 +134,7 @@ echo "=== Configuration Summary ==="
 echo "Deploy user        : ${DEPLOY_USER}"
 echo "SSH port           : ${SSH_PORT}"
 echo "SSH tailscale-only : ${SSH_TAILSCALE_ONLY}"
+echo "Passwordless sudo  : ${SUDO_NOPASSWD}"
 echo "Swap (MB)          : ${SWAP_MB}"
 echo "gVisor             : ${INSTALL_GVISOR}"
 echo "Doppler            : ${INSTALL_DOPPLER}"
@@ -198,8 +204,14 @@ else
     usermod -aG sudo "${DEPLOY_USER}"
 fi
 
-# Sudoers: require password, log usage
-write_file "/etc/sudoers.d/${DEPLOY_USER}" "${DEPLOY_USER} ALL=(ALL) ALL
+# Sudoers: passwordless (deploy user has no password set) or password-required,
+# log usage either way.
+if [ "$SUDO_NOPASSWD" = "y" ]; then
+    SUDOERS_LINE="${DEPLOY_USER} ALL=(ALL) NOPASSWD:ALL"
+else
+    SUDOERS_LINE="${DEPLOY_USER} ALL=(ALL) ALL"
+fi
+write_file "/etc/sudoers.d/${DEPLOY_USER}" "${SUDOERS_LINE}
 Defaults:${DEPLOY_USER} logfile=\"/var/log/sudo.log\"
 " 0440
 touch /var/log/sudo.log
@@ -337,9 +349,13 @@ if ! grep -q "VPS-HARDENING-DOCKER-USER" "$DOCKER_USER_RULES_PATH" 2>/dev/null; 
 # Docker bypasses UFW via the DOCKER-USER chain. These rules re-apply policy.
 *filter
 :DOCKER-USER - [0:0]
--A DOCKER-USER -i ${PUBLIC_IF} -j DROP
+-A DOCKER-USER -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+-A DOCKER-USER -i lo -j ACCEPT
+-A DOCKER-USER -i tailscale0 -j ACCEPT
+-A DOCKER-USER ! -i ${PUBLIC_IF} -j ACCEPT
 -A DOCKER-USER -i ${PUBLIC_IF} -p tcp -m tcp --dport 80 -j ACCEPT
 -A DOCKER-USER -i ${PUBLIC_IF} -p tcp -m tcp --dport 443 -j ACCEPT
+-A DOCKER-USER -i ${PUBLIC_IF} -j DROP
 COMMIT
 # ---- end VPS-HARDENING-DOCKER-USER ----
 EOF
@@ -424,9 +440,8 @@ DAEMON_JSON='{
   "icc": false,
   "userland-proxy": false,
   "no-new-privileges": true,
-  "userns-remap": "default",
   "log-driver": "json-file",
-  "log-opts": { "max-size": "20m", "max-file": 3 },
+  "log-opts": { "max-size": "20m", "max-file": "3" },
   "live-restore": true'
 if [ "$INSTALL_GVISOR" = "y" ]; then
     DAEMON_JSON="${DAEMON_JSON},
@@ -436,15 +451,6 @@ fi
 DAEMON_JSON="${DAEMON_JSON}
 }"
 write_file /etc/docker/daemon.json "$DAEMON_JSON"
-
-# userns-remap setup: ensure subuid/subgid ranges exist
-if ! grep -q "^${DEPLOY_USER}:" /etc/subuid 2>/dev/null; then
-    usermod --add-subuids 100000-165535 --add-subgids 100000-165535 "${DEPLOY_USER}"
-fi
-if ! grep -q "^dockremap:" /etc/subuid 2>/dev/null; then
-    useradd -r -s /usr/sbin/nologin dockremap 2>/dev/null || true
-    usermod --add-subuids 100000-165535 --add-subgids 100000-165535 dockremap
-fi
 
 systemctl enable docker
 systemctl restart docker
@@ -481,7 +487,17 @@ if [ "$INSTALL_CADDY" = "y" ]; then
     curl -fsSL https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt \
         | tee /etc/apt/sources.list.d/caddy-stable.list >/dev/null
     apt-get update -y
-    apt-get install -y caddy
+    apt-get install -y caddy libcap2-bin
+
+    # Stock caddy package lacks the Cloudflare DNS plugin needed for DNS-01.
+    # Replace the binary with an official build that includes it.
+    echo "  Fetching caddy build with cloudflare DNS plugin..."
+    curl -fsSL "https://caddyserver.com/api/download?os=linux&arch=$(dpkg --print-architecture)&p=github.com/caddy-dns/cloudflare" \
+        -o /usr/bin/caddy.cloudflare
+    chmod 0755 /usr/bin/caddy.cloudflare
+    setcap 'cap_net_bind_service=+ep' /usr/bin/caddy.cloudflare
+    mv /usr/bin/caddy.cloudflare /usr/bin/caddy
+    apt-mark hold caddy
 
     # Build Caddyfile from domains list
     CADDYFILE=""
@@ -563,7 +579,7 @@ SHELL=/bin/bash
 30 3 * * * root . /etc/restic/env && restic backup \$RESTIC_PATHS && restic forget --keep-daily 7 --keep-weekly 4 --keep-monthly 6 --prune
 " 0644
     # Init repo (best-effort)
-    . /etc/restic.env
+    . /etc/restic/env
     restic snapshots >/dev/null 2>&1 || restic init
 else
     echo "[15/N] Restic skipped."
@@ -771,6 +787,12 @@ fi
 # ---------------------------------------------------------------------------
 
 echo "[20/N] Configuring unattended-upgrades..."
+if [ "$AUTO_REBOOT" = "y" ]; then
+    AUTO_REBOOT_BOOL="true"
+else
+    AUTO_REBOOT_BOOL="false"
+fi
+
 write_file /etc/apt/apt.conf.d/50unattended-upgrades 'Unattended-Upgrade::Allowed-Origins {
     "${distro_id}:${distro_codename}-security";
     "${distro_id}ESMApps:${distro_codename}-apps-security";
@@ -780,7 +802,7 @@ Unattended-Upgrade::AutoFixInterruptedDpkg "true";
 Unattended-Upgrade::MinimalSteps "true";
 Unattended-Upgrade::Remove-Unused-Kernel-Packages "true";
 Unattended-Upgrade::Remove-Unused-Dependencies "true";
-Unattended-Upgrade::Automatic-Reboot "'"$AUTO_REBOOT"'";
+Unattended-Upgrade::Automatic-Reboot "'"$AUTO_REBOOT_BOOL"'";
 Unattended-Upgrade::Automatic-Reboot-Time "03:00";
 '
 
@@ -969,6 +991,16 @@ fi
 # Enable UFW last (after all rules are in place)
 echo ""
 echo "[25/N] Enabling UFW (last step, lockout-resistant)..."
+# Lockout guard: tailscale-only SSH requested but no Tailscale IP was bound
+# (e.g. blank auth key). Open the SSH port publicly so we don't lock ourselves out.
+if [ "$SSH_TAILSCALE_ONLY" = "y" ]; then
+    if ! grep -q '^ListenAddress' /etc/ssh/sshd_config.d/98-tailscale-only.conf 2>/dev/null; then
+        echo "  WARNING: Tailscale IP not bound in sshd config."
+        echo "  Opening SSH port ${SSH_PORT} on the public interface to avoid lockout."
+        echo "  After 'tailscale up', re-add the ListenAddress and remove this UFW rule."
+        ufw limit "${SSH_PORT}/tcp" comment 'SSH (fallback until Tailscale is up)' >/dev/null
+    fi
+fi
 ufw --force enable
 ufw status verbose
 
