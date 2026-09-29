@@ -213,23 +213,20 @@ else
     usermod -aG sudo "${DEPLOY_USER}"
 fi
 
-# Sudoers: passwordless (deploy user has no password set) or password-required,
-# log usage either way.
+# Sudoers: passwordless (deploy user has no password set) or password-required.
+# Sudo usage is logged via the systemd journal / auth.log.
 if [ "$SUDO_NOPASSWD" = "y" ]; then
     SUDOERS_LINE="${DEPLOY_USER} ALL=(ALL) NOPASSWD:ALL"
 else
     SUDOERS_LINE="${DEPLOY_USER} ALL=(ALL) ALL"
 fi
 write_file "/etc/sudoers.d/${DEPLOY_USER}" "${SUDOERS_LINE}
-Defaults:${DEPLOY_USER} logfile=\"/var/log/sudo.log\"
 " 0440
 if ! visudo -cf "/etc/sudoers.d/${DEPLOY_USER}" >/dev/null; then
     echo "Sudoers file failed validation; removing to keep sudo usable."
     rm -f "/etc/sudoers.d/${DEPLOY_USER}"
     exit 1
 fi
-touch /var/log/sudo.log
-chmod 600 /var/log/sudo.log
 
 # ---------------------------------------------------------------------------
 # 4. SSH key for deploy user
@@ -308,7 +305,7 @@ X11Forwarding no
 PermitTunnel no
 KexAlgorithms curve25519-sha256,curve25519-sha256@libssh.org
 Ciphers chacha20-poly1305@openssh.com,aes256-gcm@openssh.com
-MACs hmac-sha2-512-etm,hmac-sha2-256-etm
+MACs hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com
 "
 write_file /etc/ssh/sshd_config.d/99-hardening.conf "$SSHD_CONF"
 
