@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+# Render cloud-init user-data for a host.
+#
+#   bin/render hosts/oci.env            → out/oci.user-data.yaml
+#
+# Secrets:
+#   TS_AUTH_KEY   one-shot, pre-tagged Tailscale auth key. Taken from the
+#                 environment, else from Doppler (project "rock", config = host
+#                 name) when the doppler CLI is logged in.
+# SSH keys come from SSH_PUBLIC_KEYS in the host file, else ~/.ssh/id_ed25519.pub.
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+MAX_BYTES=30000  # OCI caps metadata at 32,000 bytes; Hetzner at 32 KiB
+
+host_file="${1:?usage: bin/render hosts/<host>.env}"
+[ -f "$host_file" ] || { echo "no such host file: $host_file" >&2; exit 1; }
+host="$(basename "$host_file" .env)"
+
+# shellcheck disable=SC1090
+. "$host_file"
+
+if [ -z "${SSH_PUBLIC_KEYS:-}" ]; then
+    [ -f "$HOME/.ssh/id_ed25519.pub" ] || { echo "SSH_PUBLIC_KEYS empty and ~/.ssh/id_ed25519.pub missing" >&2; exit 1; }
+    SSH_PUBLIC_KEYS="$(cat "$HOME/.ssh/id_ed25519.pub")"
+fi
+
+if [ -z "${TS_AUTH_KEY:-}" ] && command -v doppler >/dev/null 2>&1; then
+    TS_AUTH_KEY="$(doppler secrets get TS_AUTH_KEY --plain --project rock --config "$host" 2>/dev/null || true)"
+fi
+if [ -z "${TS_AUTH_KEY:-}" ]; then
+    echo "warning: no TS_AUTH_KEY; the host will open 22/tcp publicly until you run 'tailscale up'" >&2
+fi
+
+# Rebuild config.env: host file minus comments/blank lines, with resolved values.
+config="$(
+    grep -vE '^[[:space:]]*(#|$)' "$host_file" | grep -vE '^(SSH_PUBLIC_KEYS|TS_AUTH_KEY)='
+    printf 'SSH_PUBLIC_KEYS=%q\n' "$SSH_PUBLIC_KEYS"
+    [ -n "${TS_AUTH_KEY:-}" ] && printf 'TS_AUTH_KEY=%q\n' "$TS_AUTH_KEY"
+)"
+
+b64() { base64 | tr -d '\n'; }
+config_b64="$(printf '%s\n' "$config" | b64)"
+# COPYFILE_DISABLE keeps macOS tar from adding ._ resource-fork files.
+bundle_b64="$(cd "$ROOT" && COPYFILE_DISABLE=1 tar --no-xattrs --format ustar --exclude=".DS_Store" -cf - provision | gzip -9n | b64)"
+
+mkdir -p "$ROOT/out"
+out="$ROOT/out/${host}.user-data.yaml"
+umask 077
+sed -e "s|@CONFIG_B64@|${config_b64}|" -e "s|@BUNDLE_B64@|${bundle_b64}|" \
+    "$ROOT/cloud-init/user-data.tmpl.yaml" > "$out"
+
+size="$(wc -c < "$out" | tr -d ' ')"
+if [ "$size" -gt "$MAX_BYTES" ]; then
+    echo "rendered user-data is ${size} bytes (> ${MAX_BYTES}); OCI and Hetzner reject ~32 KB" >&2
+    exit 1
+fi
+echo "wrote $out (${size} bytes)"

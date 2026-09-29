@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# Copy the canonical guide (plans/00-guide.md) into sibling repos as docs/guide.md.
+#   bin/sync-guide            # ../catapult and ../conveyer
+#   bin/sync-guide DIR...     # explicit repo directories
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+src="$ROOT/plans/00-guide.md"
+
+if [ "$#" -eq 0 ]; then
+    set -- "$ROOT/../catapult" "$ROOT/../conveyer"
+fi
+
+for repo in "$@"; do
+    [ -d "$repo" ] || { echo "skip: $repo (missing)"; continue; }
+    mkdir -p "$repo/docs"
+    {
+        echo "<!-- Synced copy. Canonical: rock/plans/00-guide.md — edit there, then run rock/bin/sync-guide. -->"
+        echo
+        cat "$src"
+    } > "$repo/docs/guide.md"
+    echo "synced $repo/docs/guide.md"
+done

@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+# Converge an existing host: upload provision/ + host config, re-run modules.
+#
+#   bin/apply hosts/oci.env dev@rock-oci                 # all modules for the role
+#   bin/apply hosts/oci.env dev@rock-oci firewall ssh    # selected modules
+#   bin/apply --doppler-token hosts/oci.env dev@rock-oci # also install a Doppler
+#                                                        # service token (read from
+#                                                        # stdin or prompted)
+# shellcheck disable=SC2029  # remote paths are expanded locally on purpose
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+doppler_token=0
+if [ "${1:-}" = "--doppler-token" ]; then doppler_token=1; shift; fi
+host_file="${1:?usage: bin/apply [--doppler-token] hosts/<host>.env <ssh-target> [module...]}"
+target="${2:?missing ssh target}"
+shift 2
+
+# shellcheck disable=SC1090
+. "$host_file"
+if [ -z "${SSH_PUBLIC_KEYS:-}" ]; then
+    SSH_PUBLIC_KEYS="$(cat "$HOME/.ssh/id_ed25519.pub")"
+fi
+
+config="$(
+    grep -vE '^[[:space:]]*(#|$)' "$host_file" | grep -vE '^(SSH_PUBLIC_KEYS|TS_AUTH_KEY)='
+    printf 'SSH_PUBLIC_KEYS=%q\n' "$SSH_PUBLIC_KEYS"
+)"
+
+staging="/tmp/rock-apply.$$"
+ssh "$target" "mkdir -p $staging"
+rsync -a --delete --exclude .DS_Store "$ROOT/provision/" "$target:$staging/provision/"
+printf '%s\n' "$config" | ssh "$target" "cat > $staging/config.env"
+
+if [ "$doppler_token" -eq 1 ]; then
+    if [ -t 0 ]; then
+        read -rsp "Doppler service token: " token; echo
+    else
+        read -r token
+    fi
+    printf 'DOPPLER_TOKEN=%s\n' "$token" | ssh "$target" "cat > $staging/doppler.env"
+fi
+
+ssh -t "$target" "
+    set -e
+    sudo install -d -m 0755 /opt/rock /etc/rock
+    sudo rsync -a --delete $staging/provision/ /opt/rock/provision/
+    sudo install -m 0600 -o root -g root $staging/config.env /etc/rock/config.env
+    if [ -f $staging/doppler.env ]; then
+        sudo install -m 0640 -o root -g \"\$(id -gn)\" $staging/doppler.env /etc/rock/doppler.env
+    fi
+    rm -rf $staging
+    sudo /opt/rock/provision/provision $*
+"

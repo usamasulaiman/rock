@@ -1,0 +1,24 @@
+#cloud-config
+# Rendered by bin/render. Do not commit rendered output (it contains a one-shot
+# Tailscale auth key). Placeholders are substituted by bin/render.
+package_update: false
+package_upgrade: false
+write_files:
+  - path: /etc/rock/config.env
+    owner: root:root
+    permissions: '0600'
+    encoding: b64
+    content: @CONFIG_B64@
+  - path: /opt/rock/bundle.tar.gz
+    owner: root:root
+    permissions: '0600'
+    encoding: b64
+    content: @BUNDLE_B64@
+runcmd:
+  - - bash
+    - -c
+    - |
+      set -euo pipefail
+      tar -xzf /opt/rock/bundle.tar.gz -C /opt/rock
+      rm -f /opt/rock/bundle.tar.gz
+      /opt/rock/provision/provision 2>&1 | tee -a /var/log/rock-provision.log

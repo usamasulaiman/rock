@@ -1,0 +1,30 @@
+// Tailnet policy for rock hosts (guide §8). Apply with the Tailscale API or the
+// GitOps action; do not edit in the admin console.
+//
+// Intent:
+//   - members (you) can reach both host roles on any port
+//   - the dev host can reach the preview host for ssh/https (preview deploys)
+//   - hosts can reach nothing else: in particular, not your laptop or phone
+//   - only the dev host may use Funnel (webhook ingest)
+{
+  "tagOwners": {
+    "tag:rock-dev":     ["autogroup:admin"],
+    "tag:rock-preview": ["autogroup:admin"],
+  },
+
+  "acls": [
+    {"action": "accept", "src": ["autogroup:member"], "dst": ["tag:rock-dev:*", "tag:rock-preview:*"]},
+    {"action": "accept", "src": ["tag:rock-dev"],     "dst": ["tag:rock-preview:22,443"]},
+    // Keep member-to-member access if you use it; hosts are tags, so they are not members.
+    {"action": "accept", "src": ["autogroup:member"], "dst": ["autogroup:self:*"]},
+  ],
+
+  "nodeAttrs": [
+    {"target": ["tag:rock-dev"], "attr": ["funnel"]},
+  ],
+
+  "tests": [
+    {"src": "tag:rock-dev",     "accept": ["tag:rock-preview:22", "tag:rock-preview:443"], "deny": ["tag:rock-preview:8080"]},
+    {"src": "tag:rock-preview", "deny":   ["tag:rock-dev:22", "tag:rock-dev:443"]},
+  ],
+}

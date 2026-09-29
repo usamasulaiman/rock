@@ -1,0 +1,64 @@
+#!/usr/bin/env bash
+# Post-provision checks. Exit 0 when every check passes. Safe to run any time.
+set -uo pipefail
+
+ROCK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=provision/lib.sh
+. "$ROCK_DIR/lib.sh"
+# shellcheck disable=SC1090
+[ -f "$ROCK_CONFIG" ] && . "$ROCK_CONFIG"
+: "${ROLE:?ROLE not set}"
+: "${ROCK_USER:=dev}"
+
+fails=0
+pass() { printf '  ok    %s\n' "$1"; }
+fail() { printf '  FAIL  %s\n' "$1"; fails=$((fails + 1)); }
+check() {  # check "description" command...
+    local desc="$1"; shift
+    if "$@" >/dev/null 2>&1; then pass "$desc"; else fail "$desc"; fi
+}
+user_has() { as_user "$ROCK_USER" "command -v $1"; }
+
+echo "rock verify (role=$ROLE)"
+
+check "ufw active"                        sh -c 'ufw status | grep -q "Status: active"'
+check "incoming denied by default"        sh -c 'ufw status verbose | grep -q "deny (incoming)"'
+check "no lockout-guard rule"             test ! -e "$ROCK_STATE_DIR/lockout-guard"
+check "tailscale up"                      tailscale_up
+check "tailscale tag tag:rock-$ROLE"      sh -c "tailscale status --self --json | jq -e '.Self.Tags // [] | index(\"tag:rock-$ROLE\")'"
+check "TS_AUTH_KEY scrubbed"              sh -c "! grep -q '^TS_AUTH_KEY=' '$ROCK_CONFIG'"
+check "sshd config valid"                 sshd -t
+check "root login disabled"               sh -c 'sshd -T | grep -qx "permitrootlogin no"'
+check "password auth disabled"            sh -c 'sshd -T | grep -qx "passwordauthentication no"'
+check "$ROCK_USER blocked from metadata"  sh -c "! sudo -u '$ROCK_USER' curl -s -m 3 -o /dev/null http://169.254.169.254/"
+check "unattended-upgrades enabled"       sh -c 'grep -q "Unattended-Upgrade \"1\"" /etc/apt/apt.conf.d/20auto-upgrades'
+if [ "${SWAP_MB:-0}" -gt 0 ]; then
+    check "swap active"                   sh -c 'swapon --show | grep -q /swapfile'
+fi
+check "doppler installed"                 command -v doppler
+
+case "$ROLE" in
+dev)
+    check "node >= 24"                    sh -c 'node -e "process.exit(+process.versions.node.split(\".\")[0] >= 24 ? 0 : 1)"'
+    check "pnpm for $ROCK_USER"           user_has pnpm
+    check "gh installed"                  command -v gh
+    check "claude for $ROCK_USER"         user_has claude
+    check "pi installed"                  command -v pi
+    check "srt installed"                 command -v srt
+    check "bwrap works as $ROCK_USER"     sudo -u "$ROCK_USER" bwrap --ro-bind / / --dev /dev --proc /proc --unshare-all true
+    check "srt blocks non-allowlisted egress" \
+        sh -c "cd /tmp && ! sudo -u '$ROCK_USER' -H srt 'curl -s -m 5 -o /dev/null https://example.com'"
+    check "/srv/catapult owned by $ROCK_USER" sh -c "[ \"\$(stat -c %U /srv/catapult)\" = '$ROCK_USER' ]"
+    ;;
+preview)
+    check "docker active"                 systemctl is-active --quiet docker
+    check "caddy active"                  systemctl is-active --quiet caddy
+    check "DOCKER-USER chain present"     iptables -S DOCKER-USER
+    ;;
+esac
+
+if [ "$fails" -gt 0 ]; then
+    echo "$fails check(s) failed"
+    exit 1
+fi
+echo "all checks passed"

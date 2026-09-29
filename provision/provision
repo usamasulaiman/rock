@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+# rock provision entrypoint. Runs as root on the host, from cloud-init or bin/apply.
+# Usage: provision [module ...]   (no args = all modules for the configured role)
+set -euo pipefail
+
+ROCK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=provision/lib.sh
+. "$ROCK_DIR/lib.sh"
+
+[ "$EUID" -eq 0 ] || die "run as root"
+grep -q '^ID=ubuntu' /etc/os-release || die "Ubuntu only"
+[ -f "$ROCK_CONFIG" ] || die "missing $ROCK_CONFIG"
+
+# shellcheck disable=SC1090
+. "$ROCK_CONFIG"
+
+: "${ROLE:?ROLE must be set (dev|preview)}"
+: "${ROCK_USER:=dev}"
+: "${SSH_PUBLIC_KEYS:?SSH_PUBLIC_KEYS must be set}"
+: "${SWAP_MB:=2048}"
+: "${AUTO_REBOOT:=false}"
+: "${EGRESS_EXTRA:=22/tcp}"
+: "${HERDR_INSTALL_CMD:=}"
+: "${CADDY_DOMAINS:=}"
+
+case "$ROLE" in
+    dev)     default_modules="base users ssh tailscale firewall doppler node tools harnesses sandbox catapult-dirs" ;;
+    preview) default_modules="base users ssh tailscale firewall doppler docker caddy" ;;
+    *)       die "unknown ROLE: $ROLE" ;;
+esac
+MODULES="${MODULES:-$default_modules}"
+
+if [ "$#" -gt 0 ]; then
+    run_modules="$*"
+else
+    run_modules="$MODULES"
+fi
+
+mkdir -p "$ROCK_STATE_DIR"
+export ROCK_DIR ROLE ROCK_USER MODULES
+
+for m in $run_modules; do
+    f="$ROCK_DIR/modules/${m}.sh"
+    [ -f "$f" ] || die "unknown module: $m"
+    log "── module: $m"
+    # shellcheck disable=SC1090
+    . "$f"
+done
+
+date -u +%FT%TZ > "$ROCK_STATE_DIR/last-provision"
+log "provision complete (role=$ROLE)"
+
+if [ "$#" -eq 0 ]; then
+    "$ROCK_DIR/verify" || { warn "verify reported problems"; exit 2; }
+fi
