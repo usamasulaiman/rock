@@ -16,6 +16,7 @@ service access for the working user.
 bin/render hosts/oci.env                        # → out/oci.user-data.yaml (paste into the provider)
 bin/apply hosts/oci.env dev@rock-oci            # converge an existing host
 bin/apply --doppler-token hosts/oci.env dev@rock-oci
+bin/apply-policy                                # validate + apply the tailnet policy
 bin/sync-guide                                  # copy the design guide to catapult + conveyer
 ```
 
@@ -26,7 +27,7 @@ bin/sync-guide                                  # copy the design guide to catap
 ## Layout
 
 ```
-bin/            render, apply, sync-guide (run on your laptop)
+bin/            render, apply, apply-policy, sync-guide (run on your laptop)
 cloud-init/     user-data template
 hosts/          per-host, non-secret config
 provision/      runs on the host: provision entrypoint, lib.sh, modules/, verify

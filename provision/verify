@@ -45,6 +45,9 @@ dev)
     check "claude for $ROCK_USER"         user_has claude
     check "pi installed"                  command -v pi
     check "srt installed"                 command -v srt
+    if [ -n "${HERDR_INSTALL_CMD:-}" ]; then
+        check "herdr for $ROCK_USER"      user_has herdr
+    fi
     check "bwrap works as $ROCK_USER"     sudo -u "$ROCK_USER" bwrap --ro-bind / / --dev /dev --proc /proc --unshare-all true
     check "srt blocks non-allowlisted egress" \
         sh -c "cd /tmp && ! sudo -u '$ROCK_USER' -H srt 'curl -s -m 5 -o /dev/null https://example.com'"

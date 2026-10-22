@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+# Validate and apply tailscale/policy.hujson to the tailnet (guide §8).
+#
+#   bin/apply-policy            # validate, then apply
+#   bin/apply-policy --check    # validate only
+#
+# Secrets:
+#   TS_API_KEY   Tailscale API access token. Taken from the environment, else
+#                from Doppler (project "rock", config "tailnet").
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+POLICY="$ROOT/tailscale/policy.hujson"
+API="https://api.tailscale.com/api/v2/tailnet/-"
+
+check_only=0
+case "${1:-}" in
+    --check) check_only=1 ;;
+    "") ;;
+    *) echo "usage: bin/apply-policy [--check]" >&2; exit 2 ;;
+esac
+
+if [ -z "${TS_API_KEY:-}" ] && command -v doppler >/dev/null 2>&1; then
+    TS_API_KEY="$(doppler secrets get TS_API_KEY --plain --project rock --config tailnet 2>/dev/null || true)"
+fi
+[ -n "${TS_API_KEY:-}" ] || { echo "TS_API_KEY not set (env or Doppler rock/tailnet)" >&2; exit 1; }
+
+post() {  # post PATH → prints body, fails on HTTP >= 400
+    curl -fsS -X POST "$API$1" \
+        -H "Authorization: Bearer $TS_API_KEY" \
+        -H "Content-Type: application/hujson" \
+        --data-binary "@$POLICY"
+}
+
+# The validate endpoint also runs the policy's "tests" block.
+result="$(post /acl/validate)"
+if [ -n "$result" ] && [ "$(printf '%s' "$result" | jq -r '.message // empty')" != "" ]; then
+    echo "policy invalid:" >&2
+    printf '%s\n' "$result" | jq . >&2
+    exit 1
+fi
+echo "policy valid"
+[ "$check_only" -eq 1 ] && exit 0
+
+post /acl >/dev/null
+echo "policy applied"

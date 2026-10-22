@@ -1,6 +1,6 @@
 # rock — Plan
 
-> Follows [`00-guide.md`](./00-guide.md). This repo (local folder `linux-hardening`, remote `rock` on tangled) provisions every host.
+> Follows [`00-guide.md`](./00-guide.md). This repo provisions every host.
 
 ## Goal
 
@@ -22,6 +22,7 @@ rock/
   bin/
     render            # config + secrets → out/<host>.user-data.yaml (scripts packed inside)
     apply             # rsync to an existing host over ssh and re-run provision
+    apply-policy      # validate and apply tailscale/policy.hujson via the Tailscale API
     sync-guide        # copy plans/00-guide.md into catapult and conveyer
   cloud-init/
     user-data.tmpl.yaml

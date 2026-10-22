@@ -25,8 +25,10 @@ Running it twice must be a no-op the second time.
 
 ## Tailnet policy
 
-`tailscale/policy.hujson` is the source of truth. Apply with the Tailscale API
-(`POST /api/v2/tailnet/-/acl`) or the `tailscale/gitops-acl-action`.
+`tailscale/policy.hujson` is the source of truth; don't edit the policy in the
+admin console. `bin/apply-policy --check` validates it (including its `tests`
+block) and `bin/apply-policy` applies it. Both need `TS_API_KEY` in the
+environment or in Doppler (project `rock`, config `tailnet`).
 
 ## Break-glass
 
