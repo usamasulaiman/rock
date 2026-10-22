@@ -37,3 +37,7 @@ tailscale/      tailnet policy
 Development: `shellcheck -x provision/provision provision/verify provision/lib.sh provision/modules/*.sh bin/*`.
 
 Before committing, enable the secret scan once per clone: `git config core.hooksPath .githooks` (needs [gitleaks](https://github.com/gitleaks/gitleaks)).
+
+## License
+
+MIT. See [LICENSE](LICENSE).
