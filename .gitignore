@@ -1,3 +1,9 @@
 out/
 *.user-data.yaml
 .DS_Store
+
+# Local-only notes and data; never publish (personal transcripts, superseded plans)
+opencode-transcripts/
+extract_opencode.py
+agent-platform-plan*.md
+vps-hardening-plan.md
